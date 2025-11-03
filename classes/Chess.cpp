@@ -1,6 +1,10 @@
 #include "Chess.h"
 #include <limits>
 #include <cmath>
+#include <iostream>
+#include <sstream>
+#include <vector>
+#include <string>
 
 Chess::Chess()
 {
@@ -55,6 +59,61 @@ void Chess::FENtoBoard(const std::string& fen) {
     // convert a FEN string to a board
     // FEN is a space delimited string with 6 fields
     // 1: piece placement (from white's perspective)
+
+    _grid->forEachSquare([](ChessSquare* sq, int, int) {
+        sq->destroyBit();
+    });
+
+    const std::string placement = fen.substr(0, fen.find(' '));
+    int x = 0;
+    int y = 7;
+
+    auto charToPiece = [](char u) -> ChessPiece {
+        switch (u) {
+            case 'P': return Pawn;
+            case 'N': return Knight;
+            case 'B': return Bishop;
+            case 'R': return Rook;
+            case 'Q': return Queen;
+            case 'K': return King;
+            default:  return Pawn;
+        }
+    };
+
+    auto place = [&](int player, ChessPiece piece, int fx, int fy) {
+        if (fx < 0 || fx >= 8 || fy < 0 || fy >= 8) return;
+
+        ChessSquare* sq = _grid->getSquare(fx, fy);
+        if (!sq) return;
+
+        Bit* b = PieceForPlayer(player, piece);
+
+        int tagBase = static_cast<int>(piece);
+        b->setGameTag(player == 0 ? tagBase : (128 + tagBase));
+
+        b->setPosition(sq->getPosition());
+        sq->setBit(b);
+    };
+
+    for (char c : placement) {
+        if (c == '/') {
+            y--;
+            x = 0;
+            if (y > 7) break;
+            continue;
+        }
+        if (c >= '1' && c <= '8') {
+            x += (c - '0');
+            continue;
+        }
+        if (std::isalpha(static_cast<unsigned char>(c))) {
+            int player = std::isupper(static_cast<unsigned char>(c)) ? 0 : 1;
+            char u = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            place(player, charToPiece(u), x, y);
+            x++;
+        }
+    }
+
     // NOT PART OF THIS ASSIGNMENT BUT OTHER THINGS THAT CAN BE IN A FEN STRING
     // ARE BELOW
     // 2: active color (W or B)
@@ -121,11 +180,13 @@ std::string Chess::stateString()
 {
     std::string s;
     s.reserve(64);
-    _grid->forEachSquare([&](ChessSquare* square, int x, int y) {
-            s += pieceNotation( x, y );
+    for (int y = 7; y >= 0; --y) {
+        for (int x = 0; x < 8; ++x) {
+            s += pieceNotation(x, y);
         }
-    );
-    return s;}
+    }
+    return s;
+}
 
 void Chess::setStateString(const std::string &s)
 {
