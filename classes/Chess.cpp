@@ -1,10 +1,76 @@
 #include "Chess.h"
+#include "Bitboard.h"
 #include <limits>
 #include <cmath>
 #include <iostream>
 #include <sstream>
 #include <vector>
 #include <string>
+#include <cstdint>
+#include <cctype>
+
+// ---------- Bitboard helpers ----------
+static uint64_t KNIGHT_MASKS[64];
+static uint64_t KING_MASKS[64];
+static bool g_masksInit = false;
+
+static inline bool onBoard(int x, int y) { return (x >= 0 && x < 8 && y >= 0 && y < 8); }
+static inline int sqIndex(int x, int y) { return y * 8 + x; }
+
+static void initMoveMasks() {
+    if (g_masksInit) return;
+    const int kdx[8] = {+1,+2,+2,+1,-1,-2,-2,-1};
+    const int kdy[8] = {+2,+1,-1,-2,-2,-1,+1,+2};
+    const int Kdx[8] = {+1,+1, 0,-1,-1,-1, 0,+1};
+    const int Kdy[8] = { 0,+1,+1,+1, 0,-1,-1,-1};
+
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            int from = sqIndex(x, y);
+            uint64_t nmask = 0, kmask = 0;
+
+            for (int i = 0; i < 8; ++i) {
+                int nx = x + kdx[i], ny = y + kdy[i];
+                if (onBoard(nx, ny)) nmask |= (1ULL << sqIndex(nx, ny));
+            }
+            for (int i = 0; i < 8; ++i) {
+                int nx = x + Kdx[i], ny = y + Kdy[i];
+                if (onBoard(nx, ny)) kmask |= (1ULL << sqIndex(nx, ny));
+            }
+
+            KNIGHT_MASKS[from] = nmask;
+            KING_MASKS[from]   = kmask;
+        }
+    }
+    g_masksInit = true;
+}
+
+static void getOccupancy(Chess* self, int currentPlayer,
+                         uint64_t& friendly, uint64_t& enemy) {
+    friendly = enemy = 0ULL;
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            auto sq = self->getGrid()->getSquare(x, y);
+            if (!sq) continue;
+            auto b = sq->bit();
+            if (!b) continue;
+
+            int tag = b->gameTag();
+            int isBlack = (tag >= 128);
+            int owner   = isBlack ? 1 : 0;
+
+            uint64_t bit = (1ULL << sqIndex(x, y));
+            if (owner == currentPlayer) friendly |= bit;
+            else                        enemy    |= bit;
+        }
+    }
+}
+
+static inline int pieceTypeFromTag(int tag) {
+    return (tag >= 128) ? (tag - 128) : tag;
+}
+
+static inline int ownerFromTag(int tag) { return (tag >= 128) ? 1 : 0; }
 
 Chess::Chess()
 {
@@ -51,6 +117,10 @@ void Chess::setUpBoard()
 
     _grid->initializeChessSquares(pieceSize, "boardsquare.png");
     FENtoBoard("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR");
+
+    std::string state = stateString();
+    std::vector<BitMove> debugMoves = generateAllMoves(state, 1);
+    int moveCount = (int)debugMoves.size();
 
     startGame();
 }
@@ -138,7 +208,58 @@ bool Chess::canBitMoveFrom(Bit &bit, BitHolder &src)
 
 bool Chess::canBitMoveFromTo(Bit &bit, BitHolder &src, BitHolder &dst)
 {
-    return true;
+    if (bit.getOwner() != getCurrentPlayer()) return false;
+
+    auto* s = static_cast<ChessSquare*>(&src);
+    auto* d = static_cast<ChessSquare*>(&dst);
+    int sx = s->getColumn(), sy = s->getRow();
+    int dx = d->getColumn(), dy = d->getRow();
+    int from = sqIndex(sx, sy), to = sqIndex(dx, dy);
+
+    int tag    = bit.gameTag();
+    int owner  = ownerFromTag(tag);         
+    int ptype  = pieceTypeFromTag(tag);
+
+    uint64_t friendly=0, enemy=0;
+    getOccupancy(this, owner, friendly, enemy);
+    uint64_t empty   = ~(friendly | enemy);
+    uint64_t emptyOrEnemy = ~friendly;
+
+    if (dst.bit() && dst.bit()->getOwner() == bit.getOwner())
+        return false;
+
+    if (ptype == Knight) {
+        initMoveMasks();
+        uint64_t legal = KNIGHT_MASKS[from] & emptyOrEnemy;
+        return (legal & (1ULL << to)) != 0ULL;
+    }
+    if (ptype == King) {
+        initMoveMasks();
+        uint64_t legal = KING_MASKS[from] & emptyOrEnemy;
+        return (legal & (1ULL << to)) != 0ULL;
+    }
+
+    if (ptype == Pawn) {
+        int dir  = (owner == 0) ? +1 : -1;
+        int startRank = (owner == 0) ? 1 : 6;
+
+        if (dx == sx && dy == sy + dir) {
+            if (!dst.bit()) return true;
+            return false;
+        }
+        if (dx == sx && dy == sy + 2*dir && sy == startRank) {
+            int midy = sy + dir;
+            if (!_grid->getSquare(sx, midy)->bit() && !dst.bit()) return true;
+            return false;
+        }
+        if (dy == sy + dir && (dx == sx + 1 || dx == sx - 1)) {
+            if (dst.bit() && dst.bit()->getOwner() != bit.getOwner()) return true;
+            return false;
+        }
+        return false;
+    }
+
+    return false;
 }
 
 void Chess::stopGame()
@@ -199,4 +320,227 @@ void Chess::setStateString(const std::string &s)
             square->setBit(nullptr);
         }
     });
+}
+
+void Chess::generateKnightMoves(std::vector<BitMove>& moves, BitboardElement knightBoard, uint64_t emptyOrEnemy) 
+{
+    initMoveMasks();
+
+    knightBoard.forEachBit([&](int fromSquare)
+    {
+        uint64_t targets = KNIGHT_MASKS[fromSquare] & emptyOrEnemy;
+        BitboardElement targetBB(targets);
+        targetBB.forEachBit([&](int toSquare)
+        {
+            moves.emplace_back(fromSquare, toSquare, Knight);
+        });
+    });
+}
+
+void Chess::generateKingMoves(std::vector<BitMove>& moves, BitboardElement kingBoard, uint64_t emptyOrEnemy) 
+{
+    initMoveMasks();
+
+    kingBoard.forEachBit([&](int fromSquare)
+    {
+        uint64_t targets = KING_MASKS[fromSquare] & emptyOrEnemy;
+        BitboardElement targetBB(targets);
+        targetBB.forEachBit([&](int toSquare)
+        {
+            moves.emplace_back(fromSquare, toSquare, King);
+        });
+    });
+}
+
+void Chess::generatePawnMoves(std::vector<BitMove>& moves, int owner) 
+{
+    int dir  = (owner == 0) ? +1 : -1;
+    int startRank = (owner == 0) ? 1 : 6;
+
+    for (int y = 0; y < 8; ++y)
+    {
+        for (int x = 0; x < 8; ++x)
+        {
+            auto sq = _grid->getSquare(x, y);
+            auto b  = sq ? sq->bit() : nullptr;
+            if (!b) continue;
+
+            int tag = b->gameTag();
+            if (ownerFromTag(tag) != owner) continue;
+            if (pieceTypeFromTag(tag) != Pawn) continue;
+
+            int from = sqIndex(x, y);
+
+            int ny = y + dir;
+            if (onBoard(x, ny) && !_grid->getSquare(x, ny)->bit())
+            {
+                moves.emplace_back(from, sqIndex(x, ny), Pawn);
+
+                if (y == startRank)
+                {
+                    int ny2 = y + 2*dir;
+                    if (onBoard(x, ny2) &&
+                        !_grid->getSquare(x, ny2)->bit())
+                        moves.emplace_back(from, sqIndex(x, ny2), Pawn);
+                }
+            }
+
+            for (int dx : {-1, +1})
+            {
+                int nx = x + dx;
+                int cy = y + dir;
+                if (!onBoard(nx, cy)) continue;
+                auto target = _grid->getSquare(nx, cy);
+                if (target && target->bit())
+                {
+                    int ttag = target->bit()->gameTag();
+                    if (ownerFromTag(ttag) != owner)
+                    {
+                        moves.emplace_back(from, sqIndex(nx, cy), Pawn);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static inline bool isWhitePiece(char c)
+{
+    return std::isupper(static_cast<unsigned char>(c));
+}
+
+static inline void indexToFR(int idx, int& file, int& rank)
+{
+    rank = idx / 8;
+    file = idx % 8;
+}
+
+static inline int FRToIndex(int file, int rank)
+{
+    return rank * 8 + file;
+}
+
+std::vector<BitMove> Chess::generateAllMoves(const std::string& state, int playerColor)
+{
+    std::vector<BitMove> moves;
+    moves.reserve(32);
+
+    const bool whiteToMove = (playerColor > 0);
+
+    for (int i = 0; i < 64; ++i)
+    {
+        char c = state[i];
+        if (c == '0') continue;
+
+        bool pieceIsWhite = isWhitePiece(c);
+        if (pieceIsWhite != whiteToMove) continue;
+        int file, rank;
+        indexToFR(i, file, rank);
+
+        char lower = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+        // ---------------- KNIGHTS ----------------
+        if (lower == 'n')
+        {
+            const int kdx[8] = {+1,+2,+2,+1,-1,-2,-2,-1};
+            const int kdy[8] = {-2,-1,+1,+2,+2,+1,-1,-2};
+
+            for (int k = 0; k < 8; ++k)
+            {
+                int nf = file + kdx[k];
+                int nr = rank + kdy[k];
+                if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
+
+                int toIdx = FRToIndex(nf, nr);
+                char target = state[toIdx];
+                if (target == '0')
+                {
+                    moves.emplace_back(i, toIdx, Knight);
+                } 
+                else
+                {
+                    bool targetWhite = isWhitePiece(target);
+                    if (targetWhite != pieceIsWhite)
+                    {
+                        moves.emplace_back(i, toIdx, Knight);
+                    }
+                }
+            }
+        }
+
+        // ---------------- KING ----------------
+        else if (lower == 'k')
+        {
+            for (int df = -1; df <= 1; ++df)
+            {
+                for (int dr = -1; dr <= 1; ++dr)
+                {
+                    if (df == 0 && dr == 0) continue;
+                    int nf = file + df;
+                    int nr = rank + dr;
+                    if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
+
+                    int toIdx = FRToIndex(nf, nr);
+                    char target = state[toIdx];
+                    if (target == '0')
+                    {
+                        moves.emplace_back(i, toIdx, King);
+                    } 
+                    else
+                    {
+                        bool targetWhite = isWhitePiece(target);
+                        if (targetWhite != pieceIsWhite)
+                        {
+                            moves.emplace_back(i, toIdx, King);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------------- PAWNS ----------------
+        else if (lower == 'p')
+        {
+            int dir    = whiteToMove ? -1 : +1;
+            int startRank = whiteToMove ? 6 : 1;
+
+            int oneStepRank = rank + dir;
+            if (oneStepRank >= 0 && oneStepRank <= 7)
+            {
+                int oneIdx = FRToIndex(file, oneStepRank);
+                if (state[oneIdx] == '0') {
+                    moves.emplace_back(i, oneIdx, Pawn);
+
+                    int twoStepRank = rank + 2 * dir;
+                    if (rank == startRank && twoStepRank >= 0 && twoStepRank <= 7)
+                    {
+                        int twoIdx = FRToIndex(file, twoStepRank);
+                        if (state[twoIdx] == '0')
+                        {
+                            moves.emplace_back(i, twoIdx, Pawn);
+                        }
+                    }
+                }
+            }
+
+            for (int df : {-1, +1})
+            {
+                int nf = file + df;
+                int nr = rank + dir;
+                if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
+                int capIdx = FRToIndex(nf, nr);
+                char target = state[capIdx];
+                if (target != '0')
+                {
+                    bool targetWhite = isWhitePiece(target);
+                    if (targetWhite != pieceIsWhite)
+                    {
+                        moves.emplace_back(i, capIdx, Pawn);
+                    }
+                }
+            }
+        }
+    }
+
+    return moves;
 }
