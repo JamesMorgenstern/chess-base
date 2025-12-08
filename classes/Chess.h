@@ -31,6 +31,9 @@ public:
 
     std::vector<BitMove> generateAllMoves(const std::string& state, int playerColor);
 
+    bool gameHasAI() override { return true; }
+    void updateAI() override;
+
 private:
     Bit* PieceForPlayer(const int playerNumber, ChessPiece piece);
     Player* ownerAt(int x, int y) const;
