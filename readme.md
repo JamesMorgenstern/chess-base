@@ -7,3 +7,8 @@ I most recently added AI using negamax with alpha beta pruning. It still only ca
 One big problem I had when implementing was that the AI thought it was playing as white when it should've been playing as black.
 Also, I had a problem where the stateString was being updated so after a few turns the memory would have problems and the program would crash. This took me way too long to figure out how to fix.
 The negamax plays with a depth of 3 and I feel like the AI plays wonderfully; better than I could play.
+
+
+I have added the rest of the pieces' movement using the Professor's code that was given to us.
+I finally implemented the checkForWinner and checkForDraw functions.
+I don't think I will ever beat this AI.
